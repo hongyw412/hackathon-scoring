@@ -377,20 +377,49 @@ def render_review_cards(
 def render_participant_submission_status(
     status: dict[str, Any],
 ) -> None:
-    st.markdown("#### 참가팀 팀원")
-    for progress in status["team_progress"]:
-        completed = int(progress["completed_count"])
-        names = ", ".join(progress["names"]) or "아직 없음"
-        label = (
-            f"{progress['team']} · "
-            f"{completed}/{TEAM_MEMBERS_PER_TEAM}명"
-        )
-        with st.container(border=True):
-            if completed >= TEAM_MEMBERS_PER_TEAM:
-                st.success(label)
-            else:
-                st.warning(label)
-            st.caption(f"제출 완료 팀원: {names}")
+    """참가팀별 팀원 제출 현황을 넓은 카드 레이아웃으로 표시합니다."""
+    team_progress = status["team_progress"]
+
+    for row_start in range(0, len(team_progress), 2):
+        columns = st.columns(2)
+
+        for offset, column in enumerate(columns):
+            progress_index = row_start + offset
+            if progress_index >= len(team_progress):
+                continue
+
+            progress = team_progress[progress_index]
+            completed = int(progress["completed_count"])
+            missing = int(progress["missing_count"])
+            names = progress["names"]
+
+            with column:
+                with st.container(border=True):
+                    header_columns = st.columns([2.2, 1])
+                    header_columns[0].markdown(
+                        f"#### {progress['team']}"
+                    )
+
+                    if completed >= TEAM_MEMBERS_PER_TEAM:
+                        header_columns[1].success(
+                            f"{completed}/{TEAM_MEMBERS_PER_TEAM}명"
+                        )
+                    else:
+                        header_columns[1].warning(
+                            f"{completed}/{TEAM_MEMBERS_PER_TEAM}명"
+                        )
+
+                    st.markdown("**제출 완료 팀원**")
+                    if names:
+                        for name in names:
+                            st.markdown(f"- {name}")
+                    else:
+                        st.caption("아직 제출한 팀원이 없습니다.")
+
+                    if missing > 0:
+                        st.caption(f"남은 미제출 인원: {missing}명")
+                    else:
+                        st.caption("팀원 4명이 모두 제출했습니다.")
 
 
 def render_details(
@@ -455,26 +484,28 @@ def render_details(
 
     st.markdown("### 제출 및 미제출 현황")
     status = get_submission_status(evaluations, target_team)
-    left, right = st.columns(2)
-    with left:
-        with st.container(border=True):
-            st.markdown("#### 심사위원")
-            st.success(
-                "완료: "
-                + (
-                    ", ".join(status["completed_judges"])
-                    or "없음"
-                )
-            )
-            st.warning(
-                "미제출: "
-                + (
-                    ", ".join(status["missing_judges"])
-                    or "없음"
-                )
-            )
-    with right:
-        render_participant_submission_status(status)
+
+    st.markdown("#### 심사위원")
+    with st.container(border=True):
+        judge_columns = st.columns(2)
+        with judge_columns[0]:
+            st.markdown("**제출 완료**")
+            if status["completed_judges"]:
+                for judge in status["completed_judges"]:
+                    st.markdown(f"- {judge}")
+            else:
+                st.caption("아직 제출한 심사위원이 없습니다.")
+
+        with judge_columns[1]:
+            st.markdown("**미제출**")
+            if status["missing_judges"]:
+                for judge in status["missing_judges"]:
+                    st.markdown(f"- {judge}")
+            else:
+                st.caption("모든 심사위원이 제출했습니다.")
+
+    st.markdown("#### 참가팀 팀원")
+    render_participant_submission_status(status)
 
 
 def render_downloads(
