@@ -11,9 +11,9 @@ import streamlit as st
 from config import (
     ALLOW_SCORE_EDIT,
     JUDGES,
-    MAX_REVIEW_LENGTH,
+    MAX_COMMENT_LENGTH,
     MAX_TOTAL_SCORE,
-    MIN_REVIEW_LENGTH,
+    MIN_COMMENT_LENGTH,
     QUESTIONS,
     SCORE_LABELS,
     TEAMS,
@@ -24,6 +24,7 @@ from database import (
     DuplicateEvaluationError,
     EvaluationRepository,
     ValidationError,
+    normalize_member_name,
 )
 from styles import (
     inject_global_styles,
@@ -43,7 +44,7 @@ def initialize_state() -> None:
     defaults: dict[str, Any] = {
         "current_user": None,
         "draft_evaluation": None,
-        "flash_message": None,
+        "submission_success": None,
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -51,9 +52,38 @@ def initialize_state() -> None:
 
 
 def clear_login_state() -> None:
-    for key in ["current_user", "draft_evaluation", "flash_message"]:
+    for key in [
+        "current_user",
+        "draft_evaluation",
+        "submission_success",
+    ]:
         st.session_state.pop(key, None)
     initialize_state()
+
+
+def evaluator_display_name(user: dict[str, Any]) -> str:
+    if user.get("user_type") == "team":
+        return (
+            f"{user.get('team_name', user.get('username', ''))} · "
+            f"{user.get('member_name', '')}"
+        )
+    return str(user.get("username", ""))
+
+
+@st.dialog("🎉 평가 제출 완료")
+def render_submission_success_dialog(target_team: str) -> None:
+    st.success(f"{target_team} 팀에 대한 평가가 정상적으로 저장되었습니다.")
+    st.write(
+        "제출한 평가는 관리자 실시간 집계에 바로 반영됩니다. "
+        "다음 발표팀 평가를 계속 진행해주세요."
+    )
+    if st.button(
+        "확인하고 다음 평가하기",
+        type="primary",
+        use_container_width=True,
+    ):
+        st.session_state.submission_success = None
+        st.rerun()
 
 
 def render_login(repository: EvaluationRepository) -> None:
@@ -62,7 +92,7 @@ def render_login(repository: EvaluationRepository) -> None:
         with st.container(border=True):
             st.markdown("### 🔐 평가자 로그인")
             st.caption(
-                "운영진에게 전달받은 개인 인증 코드로 로그인해주세요."
+                "참가팀은 팀을 선택하고 본인 이름과 팀 인증 코드를 입력해주세요."
             )
 
             user_type_label = st.selectbox(
@@ -75,12 +105,19 @@ def render_login(repository: EvaluationRepository) -> None:
 
             with st.form(f"login_form_{user_type}"):
                 username = st.selectbox(
-                    "팀명 또는 심사위원 이름",
+                    "참가팀" if user_type == "team" else "심사위원",
                     names,
                     key=f"login_username_{user_type}",
                 )
+                member_name = ""
+                if user_type == "team":
+                    member_name = st.text_input(
+                        "팀원 이름",
+                        placeholder="본인의 실제 이름을 입력해주세요.",
+                        key="login_member_name",
+                    )
                 access_code = st.text_input(
-                    "개인 인증 코드",
+                    "인증 코드",
                     type="password",
                     placeholder="예: TEAM-XXXXXXXX 또는 JUDGE-XXXXXXXX",
                     key=f"login_access_code_{user_type}",
@@ -92,32 +129,49 @@ def render_login(repository: EvaluationRepository) -> None:
                 )
 
             if not submitted:
-                st.caption("인증 코드는 대소문자와 기호를 정확히 입력해주세요.")
+                st.caption(
+                    "한 팀은 동일한 팀 인증 코드로 팀원 4명이 각각 평가할 수 있습니다."
+                )
                 return
 
             if not access_code.strip():
-                st.error("개인 인증 코드를 입력해주세요.")
+                st.error("인증 코드를 입력해주세요.")
                 return
 
             try:
+                normalized_member_name = None
+                if user_type == "team":
+                    normalized_member_name = normalize_member_name(
+                        member_name
+                    )
+
                 user = repository.authenticate_user(
                     username=username,
                     user_type=user_type,
                     access_code=access_code,
                 )
-            except (AuthenticationError, AppDataError) as error:
+            except (
+                AuthenticationError,
+                ValidationError,
+                AppDataError,
+            ) as error:
                 st.error(str(error))
             else:
+                if user_type == "team":
+                    user["member_name"] = normalized_member_name
                 st.session_state.current_user = user
-                st.session_state.flash_message = "로그인되었습니다."
                 st.rerun()
 
 
 def existing_values(
     evaluation: dict[str, Any] | None,
-) -> tuple[dict[str, int | None], str]:
+) -> tuple[dict[str, int | None], str, str]:
     if not evaluation:
-        return ({question["id"]: None for question in QUESTIONS}, "")
+        return (
+            {question["id"]: None for question in QUESTIONS},
+            "",
+            "",
+        )
 
     raw_scores = evaluation.get("scores")
     scores = raw_scores if isinstance(raw_scores, dict) else {}
@@ -130,7 +184,8 @@ def existing_values(
             )
             for question in QUESTIONS
         },
-        str(evaluation.get("one_line_review", "")),
+        str(evaluation.get("strength_comment", "")),
+        str(evaluation.get("improvement_comment", "")),
     )
 
 
@@ -147,7 +202,7 @@ def render_review(
 
     top_left, top_right = st.columns(2)
     with top_left:
-        render_profile_card("평가자", str(user["username"]))
+        render_profile_card("평가자", evaluator_display_name(user))
     with top_right:
         render_profile_card("평가 대상", str(draft["target_team"]))
 
@@ -168,13 +223,25 @@ def render_review(
             st.caption(SCORE_LABELS[score])
 
     total_score = sum(draft["scores"].values())
-    score_column, review_column = st.columns([1, 2])
-    with score_column:
-        st.metric("총점", f"{total_score} / {MAX_TOTAL_SCORE}점")
-    with review_column:
-        st.markdown("**한 줄 평가**")
+    st.metric("총점", f"{total_score} / {MAX_TOTAL_SCORE}점")
+
+    opinion_columns = st.columns(2)
+    with opinion_columns[0]:
+        st.markdown("**✅ 잘한 점**")
         st.markdown(
-            f'<div class="gj-review-box">{escape(str(draft["one_line_review"]))}</div>',
+            (
+                '<div class="gj-review-box gj-strength-box">'
+                f'{escape(str(draft["strength_comment"]))}</div>'
+            ),
+            unsafe_allow_html=True,
+        )
+    with opinion_columns[1]:
+        st.markdown("**🛠️ 보완할 점**")
+        st.markdown(
+            (
+                '<div class="gj-review-box gj-improvement-box">'
+                f'{escape(str(draft["improvement_comment"]))}</div>'
+            ),
             unsafe_allow_html=True,
         )
 
@@ -193,14 +260,22 @@ def render_review(
                 user=user,
                 target_team=draft["target_team"],
                 scores=draft["scores"],
-                one_line_review=draft["one_line_review"],
+                strength_comment=draft["strength_comment"],
+                improvement_comment=draft["improvement_comment"],
                 allow_edit=ALLOW_SCORE_EDIT,
             )
-        except (DuplicateEvaluationError, ValidationError, AppDataError) as error:
+        except (
+            DuplicateEvaluationError,
+            ValidationError,
+            AppDataError,
+        ) as error:
             st.error(str(error))
         else:
+            submitted_team = str(draft["target_team"])
             st.session_state.draft_evaluation = None
-            st.session_state.flash_message = "평가가 정상적으로 제출되었습니다."
+            st.session_state.submission_success = {
+                "target_team": submitted_team,
+            }
             st.rerun()
 
 
@@ -212,7 +287,16 @@ def render_evaluation(
         render_review(repository, user)
         return
 
-    user_evaluations = repository.get_user_evaluations(str(user["id"]))
+    member_name = (
+        str(user.get("member_name", ""))
+        if user.get("user_type") == "team"
+        else None
+    )
+    user_evaluations = repository.get_user_evaluations(
+        evaluator_id=str(user["id"]),
+        evaluator_type=str(user["user_type"]),
+        member_name=member_name,
+    )
     completed_targets = {
         str(evaluation["target_team"])
         for evaluation in user_evaluations
@@ -233,11 +317,13 @@ def render_evaluation(
 
     info_columns = st.columns(3)
     with info_columns[0]:
-        render_profile_card("로그인 사용자", str(user["username"]))
+        render_profile_card("로그인 사용자", evaluator_display_name(user))
     with info_columns[1]:
         render_profile_card(
             "평가자 유형",
-            "참가팀" if user["user_type"] == "team" else "심사위원",
+            "참가팀 팀원"
+            if user["user_type"] == "team"
+            else "심사위원",
         )
     with info_columns[2]:
         render_profile_card(
@@ -248,13 +334,21 @@ def render_evaluation(
     st.markdown("")
     st.progress(
         completed_count / len(allowed_targets),
-        text=f"전체 평가 진행률 · {completed_count}/{len(allowed_targets)}",
+        text=(
+            f"개인 평가 진행률 · "
+            f"{completed_count}/{len(allowed_targets)}"
+        ),
     )
 
-    selectable_targets = allowed_targets if ALLOW_SCORE_EDIT else pending_targets
+    selectable_targets = (
+        allowed_targets if ALLOW_SCORE_EDIT else pending_targets
+    )
     if not selectable_targets:
         st.balloons()
-        st.success("모든 팀의 평가를 완료했습니다. 참여해주셔서 감사합니다!")
+        st.success(
+            "본인이 평가해야 할 모든 팀의 평가를 완료했습니다. "
+            "참여해주셔서 감사합니다!"
+        )
         return
 
     with st.container(border=True):
@@ -269,15 +363,22 @@ def render_evaluation(
             "선택한 팀의 발표가 끝난 뒤 충분히 검토하고 평가해주세요."
         )
 
-    existing = repository.get_evaluation(str(user["id"]), target_team)
-    default_scores, default_review = existing_values(
-        existing if ALLOW_SCORE_EDIT else None
+    existing = repository.get_evaluation(
+        evaluator_id=str(user["id"]),
+        evaluator_type=str(user["user_type"]),
+        target_team=target_team,
+        member_name=member_name,
     )
+    (
+        default_scores,
+        default_strength,
+        default_improvement,
+    ) = existing_values(existing if ALLOW_SCORE_EDIT else None)
 
     st.markdown(f"## {target_team} 프로젝트 평가")
     st.caption(
         "10개 문항을 각 1~5점으로 평가합니다. "
-        "마지막 한 줄 평가까지 작성해야 제출할 수 있습니다."
+        "잘한 점과 보완할 점을 모두 작성해야 제출할 수 있습니다."
     )
     render_score_legend(SCORE_LABELS)
 
@@ -312,33 +413,72 @@ def render_evaluation(
                     label_visibility="collapsed",
                 )
 
-        render_stage_header("✍️ 최종 의견 (One-line Feedback)", 1)
-        with st.container(border=True):
-            st.markdown("### 가장 강한 점 + 가장 보완해야 할 점")
-            st.caption(
-                "팀이 다음 단계로 발전하는 데 도움이 되는 구체적인 의견을 남겨주세요."
-            )
-            one_line_review = st.text_area(
-                "한 줄 평가",
-                value=default_review,
-                placeholder=(
-                    "예: 강점은 타겟 사용자가 명확하고 AI 활용 이유가 설득력 있다는 "
-                    "점이며, 보완점은 실제 사용자 검증 자료가 부족하다는 점입니다."
-                ),
-                max_chars=MAX_REVIEW_LENGTH,
-                height=130,
-                label_visibility="collapsed",
-            )
-            st.caption(
-                f"{MIN_REVIEW_LENGTH}자 이상 · {MAX_REVIEW_LENGTH}자 이하"
-            )
+        render_stage_header("✍️ 최종 의견 (Feedback)", 4)
+        opinion_columns = st.columns(2)
 
-        all_selected = all(score is not None for score in selected_scores.values())
+        with opinion_columns[0]:
+            with st.container(border=True):
+                st.markdown("### ✅ 잘한 점")
+                st.caption(
+                    "발표팀이 특히 잘한 부분을 구체적으로 작성해주세요."
+                )
+                strength_comment = st.text_area(
+                    "잘한 점",
+                    value=default_strength,
+                    placeholder=(
+                        "예: 타겟 사용자가 명확하고 AI가 핵심 문제를 "
+                        "해결하는 이유가 설득력 있게 제시되었습니다."
+                    ),
+                    max_chars=MAX_COMMENT_LENGTH,
+                    height=150,
+                    label_visibility="collapsed",
+                )
+                st.caption(
+                    f"{MIN_COMMENT_LENGTH}자 이상 · "
+                    f"{MAX_COMMENT_LENGTH}자 이하"
+                )
+
+        with opinion_columns[1]:
+            with st.container(border=True):
+                st.markdown("### 🛠️ 보완할 점")
+                st.caption(
+                    "더 발전하기 위해 보완하면 좋을 부분을 작성해주세요."
+                )
+                improvement_comment = st.text_area(
+                    "보완할 점",
+                    value=default_improvement,
+                    placeholder=(
+                        "예: 실제 사용자 인터뷰와 시장 검증 자료를 "
+                        "추가하면 아이디어의 실현 가능성이 더 높아질 것 같습니다."
+                    ),
+                    max_chars=MAX_COMMENT_LENGTH,
+                    height=150,
+                    label_visibility="collapsed",
+                )
+                st.caption(
+                    f"{MIN_COMMENT_LENGTH}자 이상 · "
+                    f"{MAX_COMMENT_LENGTH}자 이하"
+                )
+
+        all_selected = all(
+            score is not None
+            for score in selected_scores.values()
+        )
         if all_selected:
-            total = sum(int(score) for score in selected_scores.values() if score is not None)
-            st.metric("현재 선택 총점", f"{total} / {MAX_TOTAL_SCORE}점")
+            total = sum(
+                int(score)
+                for score in selected_scores.values()
+                if score is not None
+            )
+            st.metric(
+                "현재 선택 총점",
+                f"{total} / {MAX_TOTAL_SCORE}점",
+            )
         else:
-            st.info("아직 선택하지 않은 문항이 있습니다. Q1~Q10을 모두 확인해주세요.")
+            st.info(
+                "아직 선택하지 않은 문항이 있습니다. "
+                "Q1~Q10을 모두 확인해주세요."
+            )
 
         review_clicked = st.form_submit_button(
             "제출 내용 검토하기 →",
@@ -349,13 +489,30 @@ def render_evaluation(
     if not review_clicked:
         return
 
-    if not all(score is not None for score in selected_scores.values()):
+    if not all(
+        score is not None
+        for score in selected_scores.values()
+    ):
         st.error("모든 평가 문항에 점수를 선택해주세요.")
         return
 
-    normalized_review = " ".join(one_line_review.strip().split())
-    if len(normalized_review) < MIN_REVIEW_LENGTH:
-        st.error(f"한 줄 평가는 {MIN_REVIEW_LENGTH}자 이상 작성해주세요.")
+    normalized_strength = " ".join(
+        strength_comment.strip().split()
+    )
+    normalized_improvement = " ".join(
+        improvement_comment.strip().split()
+    )
+
+    if len(normalized_strength) < MIN_COMMENT_LENGTH:
+        st.error(
+            f"잘한 점은 {MIN_COMMENT_LENGTH}자 이상 작성해주세요."
+        )
+        return
+
+    if len(normalized_improvement) < MIN_COMMENT_LENGTH:
+        st.error(
+            f"보완할 점은 {MIN_COMMENT_LENGTH}자 이상 작성해주세요."
+        )
         return
 
     st.session_state.draft_evaluation = {
@@ -365,7 +522,8 @@ def render_evaluation(
             for question_id, score in selected_scores.items()
             if score is not None
         },
-        "one_line_review": normalized_review,
+        "strength_comment": normalized_strength,
+        "improvement_comment": normalized_improvement,
     }
     st.rerun()
 
@@ -392,17 +550,26 @@ def main() -> None:
         render_login(repository)
         return
 
-    if st.session_state.flash_message:
-        st.success(st.session_state.flash_message)
-        st.session_state.flash_message = None
+    if st.session_state.submission_success:
+        render_submission_success_dialog(
+            str(
+                st.session_state.submission_success[
+                    "target_team"
+                ]
+            )
+        )
 
     with st.sidebar:
         render_sidebar_brand()
         st.markdown("#### 로그인 정보")
-        st.write(f"**사용자**  \n{user['username']}")
+        st.write(f"**사용자**  \n{evaluator_display_name(user)}")
         st.write(
             "**유형**  \n"
-            + ("참가팀" if user["user_type"] == "team" else "심사위원")
+            + (
+                "참가팀 팀원"
+                if user["user_type"] == "team"
+                else "심사위원"
+            )
         )
         st.divider()
         st.caption("평가는 제출 전 최종 확인 화면을 거칩니다.")

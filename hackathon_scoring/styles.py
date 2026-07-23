@@ -249,6 +249,16 @@ html, body, [class*="css"] {
     line-height: 1.65;
 }
 
+.gj-strength-box {
+    border-left-color: var(--gj-green);
+    background: #F1FBF6;
+}
+
+.gj-improvement-box {
+    border-left-color: var(--gj-orange);
+    background: #FFF9EE;
+}
+
 .gj-team-card {
     padding: 1.05rem 1.05rem .95rem;
     min-height: 170px;
@@ -531,19 +541,25 @@ def render_team_card(
     team: str,
     score: float | None,
     judge_count: int,
-    team_count: int,
+    participant_count: int,
+    expected_judge_count: int,
+    expected_participant_count: int,
     status: str,
 ) -> None:
     score_text = f"{score:.2f}점" if score is not None else "집계 전"
-    status_class = "gj-status-done" if status == "평가 완료" else "gj-status-live"
+    status_class = (
+        "gj-status-done"
+        if status == "평가 완료"
+        else "gj-status-live"
+    )
     st.markdown(
         f"""
         <div class="gj-team-card">
           <h4>{escape(team)}</h4>
           <div class="gj-team-score">{escape(score_text)}</div>
           <div class="gj-team-meta">
-            심사위원 {judge_count}/6<br>
-            참가팀 {team_count}/5
+            심사위원 {judge_count}/{expected_judge_count}<br>
+            참가자 {participant_count}/{expected_participant_count}
           </div>
           <span class="gj-status {status_class}">{escape(status)}</span>
         </div>

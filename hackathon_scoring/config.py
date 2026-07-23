@@ -1,11 +1,11 @@
-"""해커톤 평가 시스템의 행사별 설정값."""
+"""곤지암고등학교 여름 AI 해커톤 행사 설정."""
 
 from __future__ import annotations
 
 import math
 
-APP_TITLE = "해커톤 프로젝트 평가"
-ADMIN_TITLE = "해커톤 평가 실시간 집계"
+APP_TITLE = "곤지암고등학교 여름 AI 해커톤 평가"
+ADMIN_TITLE = "곤지암고등학교 여름 AI 해커톤 실시간 집계"
 
 TEAMS = [
     "석가모니",
@@ -17,12 +17,12 @@ TEAMS = [
 ]
 
 JUDGES = [
-    "한아름 선생님",
-    "정재우 선생님",
-    "이재도 선생님",
-    "박지원 멘토",
-    "송민성 멘토",
-    "홍연우 멘토",
+    "심사위원 1",
+    "심사위원 2",
+    "심사위원 3",
+    "심사위원 4",
+    "심사위원 5",
+    "심사위원 6",
 ]
 
 QUESTIONS = [
@@ -161,31 +161,43 @@ SCORE_LABELS = {
 JUDGE_WEIGHT = 0.5
 TEAM_WEIGHT = 0.5
 
+TEAM_MEMBERS_PER_TEAM = 4
+MIN_MEMBER_NAME_LENGTH = 1
+MAX_MEMBER_NAME_LENGTH = 30
+
 ALLOW_SCORE_EDIT = False
 ADMIN_REFRESH_SECONDS = 5
 APP_TIMEZONE = "Asia/Seoul"
 
-MIN_REVIEW_LENGTH = 10
-MAX_REVIEW_LENGTH = 500
+MIN_COMMENT_LENGTH = 10
+MAX_COMMENT_LENGTH = 500
 
 QUESTION_IDS = [question["id"] for question in QUESTIONS]
 MAX_TOTAL_SCORE = len(QUESTIONS) * 5
 
 EXPECTED_JUDGE_COUNT_PER_TEAM = len(JUDGES)
-EXPECTED_TEAM_COUNT_PER_TEAM = len(TEAMS) - 1
-EXPECTED_EVALUATIONS_PER_TEAM = (
-    EXPECTED_JUDGE_COUNT_PER_TEAM + EXPECTED_TEAM_COUNT_PER_TEAM
+EXPECTED_TEAM_MEMBER_COUNT_PER_TEAM = (
+    (len(TEAMS) - 1) * TEAM_MEMBERS_PER_TEAM
 )
-EXPECTED_TOTAL_EVALUATIONS = len(TEAMS) * EXPECTED_EVALUATIONS_PER_TEAM
+EXPECTED_EVALUATIONS_PER_TEAM = (
+    EXPECTED_JUDGE_COUNT_PER_TEAM
+    + EXPECTED_TEAM_MEMBER_COUNT_PER_TEAM
+)
+EXPECTED_TOTAL_EVALUATIONS = (
+    len(TEAMS) * EXPECTED_EVALUATIONS_PER_TEAM
+)
 
 
 def validate_config() -> None:
-    """설정값의 오류를 프로그램 시작 시 확인합니다."""
+    """설정 오류를 프로그램 시작 시 확인합니다."""
     if len(TEAMS) != 6:
         raise ValueError("현재 행사는 참가팀 6개로 설정되어야 합니다.")
 
     if len(JUDGES) != 6:
         raise ValueError("현재 행사는 심사위원 6명으로 설정되어야 합니다.")
+
+    if TEAM_MEMBERS_PER_TEAM < 1:
+        raise ValueError("팀원 수는 1명 이상이어야 합니다.")
 
     if not QUESTIONS:
         raise ValueError("평가 문항은 한 개 이상이어야 합니다.")
@@ -210,13 +222,16 @@ def validate_config() -> None:
         rel_tol=1e-9,
         abs_tol=1e-9,
     ):
-        raise ValueError("심사위원과 참가팀 가중치의 합은 1이어야 합니다.")
+        raise ValueError("심사위원과 참가자 가중치의 합은 1이어야 합니다.")
 
-    if MIN_REVIEW_LENGTH < 1:
-        raise ValueError("한 줄 평가 최소 글자 수는 1자 이상이어야 합니다.")
+    if MIN_COMMENT_LENGTH < 1:
+        raise ValueError("평가 의견 최소 글자 수는 1자 이상이어야 합니다.")
 
-    if MAX_REVIEW_LENGTH < MIN_REVIEW_LENGTH:
-        raise ValueError("한 줄 평가 최대 글자 수가 최소 글자 수보다 작습니다.")
+    if MAX_COMMENT_LENGTH < MIN_COMMENT_LENGTH:
+        raise ValueError("평가 의견 최대 글자 수 설정이 올바르지 않습니다.")
+
+    if MAX_MEMBER_NAME_LENGTH < MIN_MEMBER_NAME_LENGTH:
+        raise ValueError("팀원 이름 글자 수 설정이 올바르지 않습니다.")
 
 
 validate_config()

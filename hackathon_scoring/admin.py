@@ -11,14 +11,17 @@ import streamlit as st
 from calculations import (
     build_ranking,
     build_team_summary,
-    get_submission_lists,
+    get_submission_status,
     to_korean_columns,
 )
 from config import (
     ADMIN_REFRESH_SECONDS,
+    EXPECTED_JUDGE_COUNT_PER_TEAM,
+    EXPECTED_TEAM_MEMBER_COUNT_PER_TEAM,
     EXPECTED_TOTAL_EVALUATIONS,
-    MAX_REVIEW_LENGTH,
+    MAX_COMMENT_LENGTH,
     QUESTIONS,
+    TEAM_MEMBERS_PER_TEAM,
     TEAMS,
 )
 from database import (
@@ -53,9 +56,14 @@ def render_admin_login() -> bool:
     with center:
         with st.container(border=True):
             st.markdown("### 🛡️ 운영진 로그인")
-            st.caption("실시간 집계와 데이터 관리는 운영진만 접근할 수 있습니다.")
+            st.caption(
+                "실시간 집계와 데이터 관리는 운영진만 접근할 수 있습니다."
+            )
             with st.form("admin_login_form"):
-                password = st.text_input("관리자 비밀번호", type="password")
+                password = st.text_input(
+                    "관리자 비밀번호",
+                    type="password",
+                )
                 submitted = st.form_submit_button(
                     "관리자 대시보드 열기",
                     type="primary",
@@ -77,9 +85,20 @@ def format_datetime_kst(value: Any) -> str:
         return "-"
     try:
         timestamp = pd.to_datetime(value, utc=True)
-        return timestamp.tz_convert("Asia/Seoul").strftime("%Y-%m-%d %H:%M:%S")
+        return timestamp.tz_convert("Asia/Seoul").strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
     except Exception:
         return str(value)
+
+
+def evaluator_label(evaluation: dict[str, Any]) -> str:
+    if evaluation.get("evaluator_type") == "team":
+        return (
+            f"{evaluation.get('evaluator_team', '')} · "
+            f"{evaluation.get('evaluator_member_name', '')}"
+        )
+    return str(evaluation.get("evaluator_name", ""))
 
 
 def evaluation_dataframe(
@@ -94,11 +113,14 @@ def evaluation_dataframe(
         scores = scores if isinstance(scores, dict) else {}
         row = {
             "평가 ID": evaluation.get("id"),
-            "평가자": evaluation.get("evaluator_name"),
+            "평가자": evaluator_label(evaluation),
             "평가자 유형": (
-                "참가팀" if evaluation.get("evaluator_type") == "team" else "심사위원"
+                "참가팀 팀원"
+                if evaluation.get("evaluator_type") == "team"
+                else "심사위원"
             ),
-            "평가자 소속 팀": evaluation.get("evaluator_team"),
+            "참가팀": evaluation.get("evaluator_team"),
+            "팀원 이름": evaluation.get("evaluator_member_name"),
             "평가 대상 팀": evaluation.get("target_team"),
         }
         for index, question in enumerate(QUESTIONS, start=1):
@@ -106,9 +128,14 @@ def evaluation_dataframe(
         row.update(
             {
                 "총점": evaluation.get("total_score"),
-                "한 줄 평가": evaluation.get("one_line_review"),
-                "제출 시간": format_datetime_kst(evaluation.get("submitted_at")),
-                "마지막 수정 시간": format_datetime_kst(evaluation.get("updated_at")),
+                "잘한 점": evaluation.get("strength_comment"),
+                "보완할 점": evaluation.get("improvement_comment"),
+                "제출 시간": format_datetime_kst(
+                    evaluation.get("submitted_at")
+                ),
+                "마지막 수정 시간": format_datetime_kst(
+                    evaluation.get("updated_at")
+                ),
             }
         )
         rows.append(row)
@@ -131,7 +158,15 @@ def render_team_cards(summary: pd.DataFrame) -> None:
                     team=str(row["team"]),
                     score=numeric_score,
                     judge_count=int(row["judge_count"]),
-                    team_count=int(row["team_count"]),
+                    participant_count=int(
+                        row["participant_count"]
+                    ),
+                    expected_judge_count=(
+                        EXPECTED_JUDGE_COUNT_PER_TEAM
+                    ),
+                    expected_participant_count=(
+                        EXPECTED_TEAM_MEMBER_COUNT_PER_TEAM
+                    ),
                     status=str(row["status"]),
                 )
 
@@ -146,38 +181,72 @@ def render_overview(
         if EXPECTED_TOTAL_EVALUATIONS
         else 0
     )
-    completed_count = int((summary["status"] == "평가 완료").sum())
+    completed_count = int(
+        (summary["status"] == "평가 완료").sum()
+    )
 
     complete_rows = summary[summary["final_score"].notna()]
-    provisional_rows = summary[summary["provisional_score"].notna()]
+    provisional_rows = summary[
+        summary["provisional_score"].notna()
+    ]
 
     if not complete_rows.empty:
-        leader = complete_rows.sort_values("final_score", ascending=False).iloc[0]
-        leader_text = f"{leader['team']} · {leader['final_score']:.2f}점"
+        leader = complete_rows.sort_values(
+            "final_score",
+            ascending=False,
+        ).iloc[0]
+        leader_text = (
+            f"{leader['team']} · "
+            f"{leader['final_score']:.2f}점"
+        )
     elif not provisional_rows.empty:
-        leader = provisional_rows.sort_values("provisional_score", ascending=False).iloc[0]
-        leader_text = f"{leader['team']} · {leader['provisional_score']:.2f}점"
+        leader = provisional_rows.sort_values(
+            "provisional_score",
+            ascending=False,
+        ).iloc[0]
+        leader_text = (
+            f"{leader['team']} · "
+            f"{leader['provisional_score']:.2f}점"
+        )
     else:
         leader_text = "집계 중"
 
     last_submission = "-"
     if evaluations:
-        latest = max(evaluations, key=lambda row: str(row.get("submitted_at", "")))
-        last_submission = format_datetime_kst(latest.get("submitted_at"))
+        latest = max(
+            evaluations,
+            key=lambda row: str(row.get("submitted_at", "")),
+        )
+        last_submission = format_datetime_kst(
+            latest.get("submitted_at")
+        )
 
     first = st.columns(3)
     first[0].metric("전체 제출", f"{total_submissions}건")
     first[1].metric("전체 진행률", f"{progress * 100:.1f}%")
-    first[2].metric("평가 완료 팀", f"{completed_count} / {len(TEAMS)}")
+    first[2].metric(
+        "평가 완료 팀",
+        f"{completed_count} / {len(TEAMS)}",
+    )
 
     second = st.columns(3)
     second[0].metric("현재 선두", leader_text)
-    second[1].metric("예상 전체 제출", f"{EXPECTED_TOTAL_EVALUATIONS}건")
+    second[1].metric(
+        "예상 전체 제출",
+        f"{EXPECTED_TOTAL_EVALUATIONS}건",
+    )
     second[2].metric("마지막 제출", last_submission)
 
+    st.caption(
+        "발표팀 한 곳당 참가자 20명과 심사위원 6명, "
+        "총 26명이 평가합니다."
+    )
     st.progress(
         min(progress, 1.0),
-        text=f"실시간 제출 진행 · {total_submissions}/{EXPECTED_TOTAL_EVALUATIONS}",
+        text=(
+            f"실시간 제출 진행 · "
+            f"{total_submissions}/{EXPECTED_TOTAL_EVALUATIONS}"
+        ),
     )
 
     render_team_cards(summary)
@@ -187,10 +256,10 @@ def render_overview(
             [
                 "team",
                 "judge_count",
-                "team_count",
+                "participant_count",
                 "total_count",
                 "judge_average",
-                "team_average",
+                "participant_average",
                 "provisional_score",
                 "status",
             ]
@@ -214,16 +283,18 @@ def render_overview(
 
 def render_ranking(summary: pd.DataFrame) -> None:
     st.markdown("### 🏆 종합 순위")
-    st.caption("모든 평가가 완료되기 전까지 순위는 임시 집계입니다.")
+    st.caption(
+        "모든 평가가 완료되기 전까지 순위는 임시 집계입니다."
+    )
     ranking = build_ranking(summary)
     columns = [
         "rank",
         "team",
-        "team_average",
+        "participant_average",
         "judge_average",
         "provisional_score",
         "final_score",
-        "team_count",
+        "participant_count",
         "judge_count",
         "total_count",
         "status",
@@ -236,38 +307,90 @@ def render_ranking(summary: pd.DataFrame) -> None:
             else "집계 중"
         )
     )
-    st.dataframe(display, use_container_width=True, hide_index=True)
+    st.dataframe(
+        display,
+        use_container_width=True,
+        hide_index=True,
+    )
 
 
-def render_review_cards(filtered: list[dict[str, Any]]) -> None:
+def render_review_cards(
+    filtered: list[dict[str, Any]],
+) -> None:
     if not filtered:
         st.info("조건에 맞는 평가 의견이 없습니다.")
         return
 
-    st.markdown("### 💬 평가자별 한 줄 의견")
+    st.markdown("### 💬 평가자별 의견")
     for evaluation in filtered:
         evaluator_type = (
-            "참가팀" if evaluation.get("evaluator_type") == "team" else "심사위원"
+            "참가팀 팀원"
+            if evaluation.get("evaluator_type") == "team"
+            else "심사위원"
         )
         title = (
-            f"{evaluation.get('evaluator_name')} · {evaluator_type} · "
+            f"{evaluator_label(evaluation)} · {evaluator_type} · "
             f"총점 {evaluation.get('total_score')}점"
         )
         with st.expander(title):
-            st.markdown(
-                f'<div class="gj-review-box">{escape(str(evaluation.get("one_line_review", "-")))}</div>',
-                unsafe_allow_html=True,
-            )
+            opinion_columns = st.columns(2)
+            with opinion_columns[0]:
+                st.markdown("**✅ 잘한 점**")
+                st.markdown(
+                    (
+                        '<div class="gj-review-box gj-strength-box">'
+                        f'{escape(str(evaluation.get("strength_comment", "-")))}</div>'
+                    ),
+                    unsafe_allow_html=True,
+                )
+            with opinion_columns[1]:
+                st.markdown("**🛠️ 보완할 점**")
+                st.markdown(
+                    (
+                        '<div class="gj-review-box gj-improvement-box">'
+                        f'{escape(str(evaluation.get("improvement_comment", "-")))}</div>'
+                    ),
+                    unsafe_allow_html=True,
+                )
+
             scores = evaluation.get("scores")
             scores = scores if isinstance(scores, dict) else {}
             score_rows = [
                 {
-                    "문항": f"Q{index}. {question['title']}",
+                    "문항": (
+                        f"Q{index}. {question['title']}"
+                    ),
                     "점수": scores.get(question["id"]),
                 }
-                for index, question in enumerate(QUESTIONS, start=1)
+                for index, question in enumerate(
+                    QUESTIONS,
+                    start=1,
+                )
             ]
-            st.dataframe(pd.DataFrame(score_rows), hide_index=True, use_container_width=True)
+            st.dataframe(
+                pd.DataFrame(score_rows),
+                hide_index=True,
+                use_container_width=True,
+            )
+
+
+def render_participant_submission_status(
+    status: dict[str, Any],
+) -> None:
+    st.markdown("#### 참가팀 팀원")
+    for progress in status["team_progress"]:
+        completed = int(progress["completed_count"])
+        names = ", ".join(progress["names"]) or "아직 없음"
+        label = (
+            f"{progress['team']} · "
+            f"{completed}/{TEAM_MEMBERS_PER_TEAM}명"
+        )
+        with st.container(border=True):
+            if completed >= TEAM_MEMBERS_PER_TEAM:
+                st.success(label)
+            else:
+                st.warning(label)
+            st.caption(f"제출 완료 팀원: {names}")
 
 
 def render_details(
@@ -282,47 +405,76 @@ def render_details(
     )
     evaluator_filter = filter_columns[1].selectbox(
         "평가자 유형",
-        ["전체", "참가팀", "심사위원"],
+        ["전체", "참가팀 팀원", "심사위원"],
         key="admin_detail_type",
     )
 
-    filtered = [row for row in evaluations if row.get("target_team") == target_team]
+    filtered = [
+        row for row in evaluations
+        if row.get("target_team") == target_team
+    ]
     if evaluator_filter != "전체":
-        expected_type = "team" if evaluator_filter == "참가팀" else "judge"
-        filtered = [row for row in filtered if row.get("evaluator_type") == expected_type]
+        expected_type = (
+            "team"
+            if evaluator_filter == "참가팀 팀원"
+            else "judge"
+        )
+        filtered = [
+            row for row in filtered
+            if row.get("evaluator_type") == expected_type
+        ]
 
     render_review_cards(filtered)
 
     st.markdown("### 문항별 평균")
-    team_summary = summary[summary["team"] == target_team].iloc[0]
+    team_summary = summary[
+        summary["team"] == target_team
+    ].iloc[0]
     question_rows = []
     for index, question in enumerate(QUESTIONS, start=1):
         value = team_summary[f"{question['id']}_average"]
         question_rows.append(
             {
                 "문항": f"Q{index}. {question['title']}",
-                "평균": None if pd.isna(value) else round(float(value), 2),
+                "평균": (
+                    None
+                    if pd.isna(value)
+                    else round(float(value), 2)
+                ),
             }
         )
     question_frame = pd.DataFrame(question_rows)
-    st.dataframe(question_frame, use_container_width=True, hide_index=True)
+    st.dataframe(
+        question_frame,
+        use_container_width=True,
+        hide_index=True,
+    )
     chart_frame = question_frame.dropna().set_index("문항")
     if not chart_frame.empty:
         st.bar_chart(chart_frame, height=330)
 
     st.markdown("### 제출 및 미제출 현황")
-    lists = get_submission_lists(evaluations, target_team)
+    status = get_submission_status(evaluations, target_team)
     left, right = st.columns(2)
     with left:
         with st.container(border=True):
             st.markdown("#### 심사위원")
-            st.success("완료: " + (", ".join(lists["completed_judges"]) or "없음"))
-            st.warning("미제출: " + (", ".join(lists["missing_judges"]) or "없음"))
+            st.success(
+                "완료: "
+                + (
+                    ", ".join(status["completed_judges"])
+                    or "없음"
+                )
+            )
+            st.warning(
+                "미제출: "
+                + (
+                    ", ".join(status["missing_judges"])
+                    or "없음"
+                )
+            )
     with right:
-        with st.container(border=True):
-            st.markdown("#### 참가팀")
-            st.success("완료: " + (", ".join(lists["completed_teams"]) or "없음"))
-            st.warning("미제출: " + (", ".join(lists["missing_teams"]) or "없음"))
+        render_participant_submission_status(status)
 
 
 def render_downloads(
@@ -330,21 +482,29 @@ def render_downloads(
     summary: pd.DataFrame,
 ) -> None:
     st.markdown("### 📁 결과 파일 내려받기")
-    st.caption("엑셀에서 한글이 깨지지 않도록 UTF-8 BOM 형식으로 저장됩니다.")
+    st.caption(
+        "엑셀에서 한글이 깨지지 않도록 UTF-8 BOM 형식으로 저장됩니다."
+    )
     evaluation_frame = evaluation_dataframe(evaluations)
-    ranking_frame = to_korean_columns(build_ranking(summary))
+    ranking_frame = to_korean_columns(
+        build_ranking(summary)
+    )
 
     left, right = st.columns(2)
     left.download_button(
         "전체 평가 결과 CSV",
-        evaluation_frame.to_csv(index=False).encode("utf-8-sig"),
+        evaluation_frame.to_csv(index=False).encode(
+            "utf-8-sig"
+        ),
         file_name="gonjiam_ai_hackathon_evaluations.csv",
         mime="text/csv",
         use_container_width=True,
     )
     right.download_button(
         "전체 순위 CSV",
-        ranking_frame.to_csv(index=False).encode("utf-8-sig"),
+        ranking_frame.to_csv(index=False).encode(
+            "utf-8-sig"
+        ),
         file_name="gonjiam_ai_hackathon_ranking.csv",
         mime="text/csv",
         use_container_width=True,
@@ -359,36 +519,65 @@ def render_data_management(
     if evaluations:
         option_map = {
             (
-                f"{row['target_team']} ← {row['evaluator_name']} "
-                f"({row['evaluator_type']}, 총점 {row['total_score']})"
+                f"{row['target_team']} ← {evaluator_label(row)} "
+                f"(총점 {row['total_score']})"
             ): row
             for row in evaluations
         }
-        selected_label = st.selectbox("관리할 평가 결과", list(option_map.keys()))
+        selected_label = st.selectbox(
+            "관리할 평가 결과",
+            list(option_map.keys()),
+        )
         selected = option_map[selected_label]
         selected_scores = selected.get("scores")
-        selected_scores = selected_scores if isinstance(selected_scores, dict) else {}
+        selected_scores = (
+            selected_scores
+            if isinstance(selected_scores, dict)
+            else {}
+        )
 
         with st.container(border=True):
             with st.form("admin_edit_evaluation_form"):
                 scores: dict[str, int] = {}
-                for index, question in enumerate(QUESTIONS, start=1):
+                for index, question in enumerate(
+                    QUESTIONS,
+                    start=1,
+                ):
                     scores[question["id"]] = int(
                         st.number_input(
                             f"Q{index}. {question['title']}",
                             min_value=1,
                             max_value=5,
-                            value=int(selected_scores.get(question["id"], 3)),
+                            value=int(
+                                selected_scores.get(
+                                    question["id"],
+                                    3,
+                                )
+                            ),
                             step=1,
                         )
                     )
 
-                review = st.text_area(
-                    "한 줄 평가",
-                    value=str(selected.get("one_line_review", "")),
-                    max_chars=MAX_REVIEW_LENGTH,
+                strength_comment = st.text_area(
+                    "잘한 점",
+                    value=str(
+                        selected.get("strength_comment", "")
+                    ),
+                    max_chars=MAX_COMMENT_LENGTH,
                 )
-                confirm_edit = st.checkbox("위 내용으로 수정합니다.")
+                improvement_comment = st.text_area(
+                    "보완할 점",
+                    value=str(
+                        selected.get(
+                            "improvement_comment",
+                            "",
+                        )
+                    ),
+                    max_chars=MAX_COMMENT_LENGTH,
+                )
+                confirm_edit = st.checkbox(
+                    "위 내용으로 수정합니다."
+                )
                 edit_submitted = st.form_submit_button(
                     "평가 결과 수정",
                     use_container_width=True,
@@ -400,7 +589,10 @@ def render_data_management(
                 else:
                     try:
                         repository.admin_update_evaluation(
-                            str(selected["id"]), scores, review
+                            str(selected["id"]),
+                            scores,
+                            strength_comment,
+                            improvement_comment,
                         )
                     except AppDataError as error:
                         st.error(str(error))
@@ -408,37 +600,62 @@ def render_data_management(
                         st.success("평가 결과를 수정했습니다.")
                         st.rerun()
 
-            confirm_delete = st.checkbox("선택한 평가 결과를 삭제합니다.")
-            if st.button("선택한 평가 결과 삭제", use_container_width=True):
+            confirm_delete = st.checkbox(
+                "선택한 평가 결과를 삭제합니다."
+            )
+            if st.button(
+                "선택한 평가 결과 삭제",
+                use_container_width=True,
+            ):
                 if not confirm_delete:
                     st.error("삭제 확인 항목을 선택해주세요.")
                 else:
-                    repository.delete_evaluation(str(selected["id"]))
+                    repository.delete_evaluation(
+                        str(selected["id"])
+                    )
                     st.rerun()
     else:
         st.info("관리할 평가 결과가 없습니다.")
 
     st.divider()
     st.markdown(
-        '<div class="gj-danger-note"><b>주의</b> · 전체 삭제는 평가 결과만 삭제하며 사용자 계정과 인증 코드는 유지됩니다.</div>',
+        (
+            '<div class="gj-danger-note"><b>주의</b> · '
+            "전체 삭제는 평가 결과만 삭제하며 사용자 계정과 "
+            "인증 코드는 유지됩니다.</div>"
+        ),
         unsafe_allow_html=True,
     )
-    phrase = st.text_input('계속하려면 "전체삭제"를 입력하세요.')
-    if st.button("전체 평가 데이터 삭제", type="primary", use_container_width=True):
+    phrase = st.text_input(
+        '계속하려면 "전체삭제"를 입력하세요.'
+    )
+    if st.button(
+        "전체 평가 데이터 삭제",
+        type="primary",
+        use_container_width=True,
+    ):
         if phrase != "전체삭제":
-            st.error('확인 문구 "전체삭제"를 정확히 입력해주세요.')
+            st.error(
+                '확인 문구 "전체삭제"를 정확히 입력해주세요.'
+            )
         else:
             repository.reset_evaluations()
             st.success("전체 평가 데이터를 삭제했습니다.")
             st.rerun()
 
 
-def render_realtime_dashboard(repository: EvaluationRepository) -> None:
+def render_realtime_dashboard(
+    repository: EvaluationRepository,
+) -> None:
     evaluations = repository.get_all_evaluations()
     summary = build_team_summary(evaluations)
 
     overview_tab, ranking_tab, detail_tab = st.tabs(
-        ["실시간 현황", "종합 순위", "상세 평가 및 미제출자"]
+        [
+            "실시간 현황",
+            "종합 순위",
+            "상세 평가 및 미제출자",
+        ]
     )
     with overview_tab:
         render_overview(evaluations, summary)
@@ -470,13 +687,21 @@ def main() -> None:
     with st.sidebar:
         render_sidebar_brand()
         st.markdown("#### 운영 도구")
-        if st.button("즉시 새로고침", use_container_width=True):
+        if st.button(
+            "즉시 새로고침",
+            use_container_width=True,
+        ):
             st.rerun()
-        if st.button("관리자 로그아웃", use_container_width=True):
+        if st.button(
+            "관리자 로그아웃",
+            use_container_width=True,
+        ):
             st.session_state.admin_authenticated = False
             st.rerun()
         st.divider()
-        st.caption(f"대시보드는 {ADMIN_REFRESH_SECONDS}초마다 자동 갱신됩니다.")
+        st.caption(
+            f"대시보드는 {ADMIN_REFRESH_SECONDS}초마다 자동 갱신됩니다."
+        )
 
     @st.fragment(run_every=f"{ADMIN_REFRESH_SECONDS}s")
     def live_fragment() -> None:
@@ -490,7 +715,9 @@ def main() -> None:
     st.divider()
     evaluations = repository.get_all_evaluations()
     summary = build_team_summary(evaluations)
-    download_tab, management_tab = st.tabs(["CSV 다운로드", "데이터 관리"])
+    download_tab, management_tab = st.tabs(
+        ["CSV 다운로드", "데이터 관리"]
+    )
     with download_tab:
         render_downloads(evaluations, summary)
     with management_tab:
